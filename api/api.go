@@ -1,7 +1,9 @@
 package api
 
 import (
+	"czechia.dev/probes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/gorilla/mux"
 	echoSwagger "github.com/swaggo/http-swagger"
@@ -10,21 +12,42 @@ import (
 	"kube-metric-collector/common"
 	"kube-metric-collector/model"
 	"net/http"
+	"time"
 )
 
 var rd *render.Render
 
+const alive = true
+
+func isAlive() error {
+	if alive {
+		return nil
+	}
+	return errors.New("application is not alive")
+}
+
 func ProcessREST() {
-	mux := NewHandler()
-	err := http.ListenAndServe(":8900", mux)
-	if err != nil {
+	// Start liveness and readiness probes
+	go probes.StartProbes(isAlive)
+
+	// Create HTTP handler
+	r := NewHandler()
+
+	server := &http.Server{
+		Addr:         ":8900",
+		Handler:      r,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// Start HTTP server
+	if err := server.ListenAndServe(); err != nil {
 		fmt.Println("Listen error :: ", err)
-		return
 	}
 }
 
 func NewHandler() http.Handler {
-	//mux := pat.New()
 
 	r := mux.NewRouter()
 
@@ -34,28 +57,23 @@ func NewHandler() http.Handler {
 	r.HandleFunc("/v1/metrics/cluster/dashboard", use(getDashboardData, basicAuth)).Methods("POST")
 	r.HandleFunc("/getDashboardData", use(getDashboardData, basicAuth)).Methods("POST")
 
+	// Register probes endpoints
+	r.HandleFunc("/actuator/health/liveness", probeRoute(probes.Liveness)).Methods("GET")
+	r.HandleFunc("/actuator/health/readiness", probeRoute(probes.Readiness)).Methods("GET")
+
 	r.PathPrefix("/swagger").Handler(echoSwagger.WrapHandler).Methods("GET")
 
-	//amw := authenticationMiddleware{tokenUsers: make(map[string]string)}
-	//amw.Populate()
-
-	//mux.Use(amw.Middleware)
-
-	//queue에 넣는 API, 백단에서는 Queue를 계속 관찰한다.
-	//mux.Get("/getNodeStatus", getClusterStatusHandler)
-	//mux.Post("/getDashboardData", getDashboardData)
-	//mux.HandleFunc("/v1/metrics/cluster/node", use(getClusterStatusHandler, basicAuth))
-	//mux.HandleFunc("/getNodeStatus", use(getClusterStatusHandler, basicAuth))
-	//mux.HandleFunc("/v1/metrics/cluster/dashboard", use(getDashboardData, basicAuth))
-	//mux.HandleFunc("/getDashboardData", use(getDashboardData, basicAuth))
-	//
-	//mux.Get("/v1/metrics/cluster/ping/{clusterId}", getClusterPing)
-	//
-	//mux.PathPrefix("/swagger").Handler(echoSwagger.WrapHandler)
-
-	//mux.PathPrefix("/swagger2").Handler(echoSwagger.WrapHandler)
-
 	return r
+}
+
+func probeRoute(p *probes.Probe) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if p.IsUp() {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}
 }
 
 // @Summary Create model.ResponsePing
